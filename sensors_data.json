@@ -1,0 +1,8 @@
+{
+    "timestamp": "2026-10-13T00:32:23+05:30",
+    "soil_moisture": 0.0,
+    "temperature": 24.0,
+    "humidity": 40.0,
+    "irrigation": "ON",
+    "threshold": 30
+}
