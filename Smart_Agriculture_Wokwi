@@ -1,0 +1,305 @@
+#include <WiFi.h>
+#include <PubSubClient.h>
+#include <DHT.h>
+
+// ==================================================
+// SMART AGRICULTURE IoT SYSTEM
+// ESP32 + WOKWI + MQTT
+// ==================================================
+
+// Pin configuration
+#define SOIL_PIN 34
+#define DHT_PIN 15
+#define DHT_TYPE DHT22
+#define PUMP_PIN 23
+
+// Wi-Fi settings
+const char* WIFI_SSID = "Wokwi-GUEST";
+const char* WIFI_PASSWORD = "";
+
+// MQTT broker
+const char* MQTT_BROKER = "broker.hivemq.com";
+const int MQTT_PORT = 1883;
+
+// MQTT topics
+const char* MQTT_TOPIC =
+  "smartagri/demo/esp32_84127/sensors";
+
+const char* CONTROL_TOPIC =
+  "smartagri/demo/esp32_84127/control";
+
+// Default irrigation threshold
+int moistureThreshold = 30;
+
+// Publishing interval
+unsigned long lastPublish = 0;
+const unsigned long PUBLISH_INTERVAL = 3000;
+
+// Initialize components
+DHT dht(DHT_PIN, DHT_TYPE);
+
+WiFiClient wifiClient;
+PubSubClient mqtt(wifiClient);
+
+// ==================================================
+// MQTT MESSAGE CALLBACK
+// Receives threshold commands from Streamlit
+// ==================================================
+
+void mqttCallback(
+  char* topic,
+  byte* payload,
+  unsigned int length
+) {
+  if (strcmp(topic, CONTROL_TOPIC) != 0) {
+    return;
+  }
+
+  char message[20];
+
+  if (length == 0 || length >= sizeof(message)) {
+    Serial.println("Invalid threshold message.");
+    return;
+  }
+
+  memcpy(message, payload, length);
+  message[length] = '\0';
+
+  char* endPointer;
+  long newThreshold = strtol(message, &endPointer, 10);
+
+  if (
+    endPointer == message ||
+    *endPointer != '\0' ||
+    newThreshold < 10 ||
+    newThreshold > 80 ||
+    newThreshold % 5 != 0
+  ) {
+    Serial.println("Invalid threshold value.");
+    return;
+  }
+
+  moistureThreshold = (int)newThreshold;
+
+  Serial.print("THRESHOLD UPDATED: ");
+  Serial.print(moistureThreshold);
+  Serial.println("%");
+}
+
+// ==================================================
+// CONNECT TO WIFI
+// ==================================================
+
+void connectWiFi() {
+
+  Serial.print("Connecting to Wi-Fi...");
+
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD, 6);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println();
+  Serial.println("Wi-Fi connected!");
+
+  Serial.print("IP Address: ");
+  Serial.println(WiFi.localIP());
+}
+
+// ==================================================
+// CONNECT TO MQTT
+// ==================================================
+
+void connectMQTT() {
+
+  while (!mqtt.connected()) {
+
+    Serial.print("Connecting to MQTT broker...");
+
+    String clientId = "SmartAgri-ESP32-";
+    clientId += String(random(0x7fffffff), HEX);
+
+    if (mqtt.connect(clientId.c_str())) {
+
+      Serial.println("MQTT connected!");
+
+      if (mqtt.subscribe(CONTROL_TOPIC)) {
+        Serial.println("Control topic subscribed!");
+      } else {
+        Serial.println("Control topic subscription failed!");
+      }
+
+    } else {
+
+      Serial.print("MQTT connection failed. State: ");
+      Serial.println(mqtt.state());
+
+      Serial.println("Retrying in 3 seconds...");
+      delay(3000);
+    }
+  }
+}
+
+// ==================================================
+// SETUP
+// ==================================================
+
+void setup() {
+
+  Serial.begin(115200);
+
+  pinMode(SOIL_PIN, INPUT);
+  pinMode(PUMP_PIN, OUTPUT);
+
+  digitalWrite(PUMP_PIN, LOW);
+
+  analogReadResolution(12);
+
+  dht.begin();
+
+  Serial.println();
+  Serial.println("SMART AGRICULTURE IoT SYSTEM");
+
+  connectWiFi();
+
+  mqtt.setServer(MQTT_BROKER, MQTT_PORT);
+  mqtt.setCallback(mqttCallback);
+  mqtt.setBufferSize(256);
+
+  connectMQTT();
+
+  Serial.println("ESP32 setup completed.");
+}
+
+// ==================================================
+// MAIN LOOP
+// ==================================================
+
+void loop() {
+
+  // Reconnect Wi-Fi when disconnected
+  if (WiFi.status() != WL_CONNECTED) {
+    connectWiFi();
+  }
+
+  // Reconnect MQTT when disconnected
+  if (!mqtt.connected()) {
+    connectMQTT();
+  }
+
+  // Process incoming MQTT messages
+  mqtt.loop();
+
+  unsigned long currentMillis = millis();
+
+  if (
+    currentMillis - lastPublish >= PUBLISH_INTERVAL
+  ) {
+
+    lastPublish = currentMillis;
+
+    // Read potentiometer
+    int soilRaw = analogRead(SOIL_PIN);
+
+    // Convert raw ADC value to simulated moisture
+    int moisture = map(
+      soilRaw,
+      0,
+      4095,
+      0,
+      100
+    );
+
+    moisture = constrain(moisture, 0, 100);
+
+    // Read DHT22
+    float temperature = dht.readTemperature();
+    float humidity = dht.readHumidity();
+
+    // Automatic irrigation decision
+    bool irrigationON =
+      (moisture < moistureThreshold);
+
+    // LED represents irrigation output
+    digitalWrite(
+      PUMP_PIN,
+      irrigationON ? HIGH : LOW
+    );
+
+    // Prepare JSON sensor message
+    char payload[200];
+
+    if (
+      isnan(temperature) ||
+      isnan(humidity)
+    ) {
+
+      snprintf(
+        payload,
+        sizeof(payload),
+        "{\"soil_moisture\":%d,"
+        "\"irrigation\":\"%s\","
+        "\"threshold\":%d}",
+        moisture,
+        irrigationON ? "ON" : "OFF",
+        moistureThreshold
+      );
+
+    } else {
+
+      snprintf(
+        payload,
+        sizeof(payload),
+        "{\"soil_moisture\":%d,"
+        "\"temperature\":%.1f,"
+        "\"humidity\":%.1f,"
+        "\"irrigation\":\"%s\","
+        "\"threshold\":%d}",
+        moisture,
+        temperature,
+        humidity,
+        irrigationON ? "ON" : "OFF",
+        moistureThreshold
+      );
+    }
+
+    // Display readings in Serial Monitor
+    Serial.println();
+    Serial.println("----------------------------");
+
+    Serial.print("Soil Moisture: ");
+    Serial.print(moisture);
+    Serial.println("%");
+
+    Serial.print("Temperature: ");
+    Serial.println(temperature);
+
+    Serial.print("Humidity: ");
+    Serial.println(humidity);
+
+    Serial.print("Threshold: ");
+    Serial.print(moistureThreshold);
+    Serial.println("%");
+
+    Serial.print("Irrigation: ");
+    Serial.println(irrigationON ? "ON" : "OFF");
+
+    Serial.print("MQTT Message: ");
+    Serial.println(payload);
+
+    // Publish sensor data
+    if (mqtt.publish(MQTT_TOPIC, payload)) {
+      Serial.println("MQTT publish successful!");
+    } else {
+      Serial.println("MQTT publish failed!");
+    }
+
+    Serial.print("MQTT Topic: ");
+    Serial.println(MQTT_TOPIC);
+
+    Serial.println("----------------------------");
+  }
+}
